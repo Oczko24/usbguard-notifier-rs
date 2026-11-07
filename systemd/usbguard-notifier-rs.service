@@ -1,0 +1,23 @@
+[Unit]
+Description=USBGuard Hardened Interactive Notification Agent (Rust)
+Documentation=man:usbguard(1) https://github.com/Oczko24/usbguard-notifier-rs
+After=usbguard.service graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/usbguard-notifier-rs
+Restart=on-failure
+RestartSec=3
+
+# Systemd Security Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

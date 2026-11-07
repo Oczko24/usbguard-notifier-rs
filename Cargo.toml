@@ -1,0 +1,23 @@
+[package]
+name = "usbguard-notifier-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Oczko24"]
+description = "A lightweight, memory-safe, and interactive USBGuard desktop notification daemon written in Rust."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Oczko24/usbguard-notifier-rs"
+readme = "README.md"
+keywords = ["usbguard", "security", "notifications", "desktop", "gnome"]
+categories = ["command-line-utilities", "os::linux-apis"]
+
+[dependencies]
+zbus = { version = "4", default-features = false, features = ["async-io"] }
+async-io = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await", "async-await-macro"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

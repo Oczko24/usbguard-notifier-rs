@@ -1,0 +1,16 @@
+// /etc/polkit-1/rules.d/70-usbguard-user.rules
+//
+// Allow users in the 'wheel' group (or logged into an active local graphical session)
+// to authorize USB devices through USBGuard without requiring root authentication every time.
+//
+// Copy this file to: /etc/polkit-1/rules.d/70-usbguard-user.rules
+
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.usbguard.Devices1.applyDevicePolicy" ||
+         action.id == "org.usbguard.Policy1.appendRule" ||
+         action.id == "org.usbguard.Policy1.removeRule") &&
+        subject.isInGroup("wheel") &&
+        subject.active) {
+        return polkit.Result.YES;
+    }
+});
