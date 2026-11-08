@@ -3,3 +3,9 @@
 *.swp
 *.bak
 .DS_Store
+
+# Test & Fuzz artifacts
+*.proptest-regressions
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts

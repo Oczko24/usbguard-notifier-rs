@@ -1,0 +1,26 @@
+[package]
+name = "usbguard-notifier-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.usbguard-notifier-rs]
+path = ".."
+
+[[bin]]
+name = "fuzz_sanitize"
+path = "fuzz_targets/fuzz_sanitize.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_extract_attr"
+path = "fuzz_targets/fuzz_extract_attr.rs"
+test = false
+doc = false

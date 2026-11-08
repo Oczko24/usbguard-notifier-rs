@@ -1,6 +1,6 @@
 [package]
 name = "usbguard-notifier-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Oczko24"]
 description = "A lightweight, memory-safe, and interactive USBGuard desktop notification daemon written in Rust."
@@ -13,7 +13,12 @@ categories = ["command-line-utilities", "os::linux-apis"]
 [dependencies]
 zbus = { version = "4", default-features = false, features = ["async-io"] }
 async-io = "2"
+async-channel = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await", "async-await-macro"] }
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
+
+[dev-dependencies]
+proptest = "1"
 
 [profile.release]
 opt-level = "z"

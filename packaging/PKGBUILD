@@ -1,0 +1,42 @@
+# Maintainer: Oczko24 <oczko24@users.noreply.github.com>
+pkgname=usbguard-notifier-rs
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Minimal, hardened interactive USBGuard desktop notification daemon in Rust"
+arch=('x86_64')
+url="https://github.com/Oczko24/usbguard-notifier-rs"
+license=('MIT' 'Apache-2.0')
+depends=('usbguard' 'polkit')
+makedepends=('rust' 'cargo')
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "${pkgname}-${pkgver}"
+    export RUSTFLAGS="-D warnings"
+    cargo build --release --locked
+}
+
+check() {
+    cd "${pkgname}-${pkgver}"
+    cargo test --release --locked
+}
+
+package() {
+    cd "${pkgname}-${pkgver}"
+
+    # Binary
+    install -Dm755 "target/release/${pkgname}" "${pkgdir}/usr/bin/${pkgname}"
+
+    # Systemd user service
+    install -Dm644 "systemd/${pkgname}.service" "${pkgdir}/usr/lib/systemd/user/${pkgname}.service"
+
+    # Polkit rules
+    install -Dm644 "polkit/70-usbguard-user.rules" "${pkgdir}/etc/polkit-1/rules.d/70-usbguard-user.rules"
+
+    # License
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+    # Documentation
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

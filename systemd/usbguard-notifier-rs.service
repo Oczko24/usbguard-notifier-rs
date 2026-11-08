@@ -3,26 +3,48 @@ Description=USBGuard Hardened Interactive Notification Agent (Rust)
 Documentation=man:usbguard(1) https://github.com/Oczko24/usbguard-notifier-rs
 After=usbguard.service graphical-session.target
 PartOf=graphical-session.target
+ConditionEnvironment=|DISPLAY
+ConditionEnvironment=|WAYLAND_DISPLAY
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/usbguard-notifier-rs
 Restart=on-failure
 RestartSec=3
+RestartMaxDelaySec=60
 
-# Systemd Security Hardening
+# -- Process & Filesystem Isolation --
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
+
+# -- Privilege & Personality Restrictions --
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
-SystemCallArchitectures=native
+
+# -- Memory Protection --
+MemoryDenyWriteExecute=yes
+
+# -- Network Restrictions --
 RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+# -- File Creation --
 UMask=0077
+
+# -- Syscall Filtering & Seccomp --
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @signal
+SystemCallFilter=~@privileged @resources @mount @clock @cpu-emulation @debug @module @raw-io @reboot @swap @obsolete
+SystemCallErrorNumber=EPERM
+
+# -- Resource Limits --
+LimitNOFILE=64
+MemoryMax=32M
+TasksMax=16
 
 [Install]
 WantedBy=default.target

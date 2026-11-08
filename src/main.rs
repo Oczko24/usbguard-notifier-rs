@@ -1,16 +1,28 @@
 //! usbguard-notifier-rs
 //!
-//! A minimal, memory-safe, hardened interactive USBGuard notification daemon.
-//! Vibecoded with high-effort engineering rigor.
+//! A minimal, memory-safe, hardened interactive USBGuard desktop notification daemon.
+//! Bridges `org.usbguard1` D-Bus signals with FreeDesktop desktop notifications
+//! to provide one-click USB device authorization (Allow Once / Allow Always / Keep Blocked).
+//!
+//! Engineered with defense-in-depth against BadUSB descriptor spoofing, Pango markup
+//! injection, bidirectional Unicode attacks, notification flooding, and D-Bus broker
+//! disconnections with automatic exponential backoff reconnection.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::too_many_arguments)]
 
 use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
+use async_channel::Receiver;
+use futures_util::{FutureExt, StreamExt};
+use usbguard_notifier_rs::{extract_attr, sanitize, strip_markup};
 use zbus::zvariant::Value;
+
+// ---------------------------------------------------------------------------
+// D-Bus proxy definitions
+// ---------------------------------------------------------------------------
 
 #[zbus::proxy(
     interface = "org.usbguard.Devices1",
@@ -63,6 +75,9 @@ trait Notifications {
 
     fn close_notification(&self, id: u32) -> zbus::Result<()>;
 
+    /// Queries the notification server for supported capabilities.
+    fn get_capabilities(&self) -> zbus::Result<Vec<String>>;
+
     #[zbus(signal)]
     fn action_invoked(&self, id: u32, action_key: String) -> zbus::Result<()>;
 
@@ -70,58 +85,45 @@ trait Notifications {
     fn notification_closed(&self, id: u32, reason: u32) -> zbus::Result<()>;
 }
 
-/// Sanitizes untrusted USB descriptor strings to prevent Pango/HTML markup injection,
-/// ANSI terminal escapes, bidirectional text spoofing, and layout disruption.
-fn sanitize(input: &str, max_len: usize, fallback: &str) -> String {
-    let mut clean = String::with_capacity(input.len().min(max_len * 6));
-    for c in input.chars().take(max_len) {
-        match c {
-            '&' => clean.push_str("&amp;"),
-            '<' => clean.push_str("&lt;"),
-            '>' => clean.push_str("&gt;"),
-            '"' => clean.push_str("&quot;"),
-            '\'' => clean.push_str("&apos;"),
-            // Strip bidirectional override characters (Trojan Source attacks)
-            '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => (),
-            // Replace control characters (including newlines and escapes) with space
-            c if c.is_control() => clean.push(' '),
-            c => clean.push(c),
+// ---------------------------------------------------------------------------
+// Desktop notification server capabilities
+// ---------------------------------------------------------------------------
+
+/// Notification server capability flags, queried once at session startup.
+struct ServerCaps {
+    has_actions: bool,
+    has_markup: bool,
+}
+
+impl ServerCaps {
+    async fn query(proxy: &NotificationsProxy<'_>, debug: bool) -> Self {
+        let caps = proxy.get_capabilities().await.unwrap_or_default();
+        let has_actions = caps.iter().any(|c| c == "actions");
+        let has_markup = caps.iter().any(|c| c == "body-markup");
+        if debug {
+            eprintln!(
+                "[DEBUG] Notification server capabilities: actions={has_actions}, markup={has_markup} (raw: {caps:?})"
+            );
         }
-    }
-    let trimmed = clean.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.to_string()
+        Self {
+            has_actions,
+            has_markup,
+        }
     }
 }
 
-/// Extracts a USB attribute from the D-Bus map, falling back to parsing the raw device rule string.
-fn extract_attr<'a>(attrs: &'a HashMap<String, String>, key: &str, rule: &'a str) -> &'a str {
-    if let Some(val) = attrs.get(key) {
-        if !val.is_empty() {
-            return val.as_str();
-        }
-    }
-    if key == "id" {
-        if let Some(pos) = rule.find("id ") {
-            return rule[pos + 3..].split_whitespace().next().unwrap_or("");
-        }
-    } else {
-        let pattern = format!("{key} \"");
-        if let Some(pos) = rule.find(&pattern) {
-            let slice = &rule[pos + pattern.len()..];
-            if let Some(end) = slice.find('"') {
-                return &slice[..end];
-            }
-        }
-    }
-    ""
-}
+// ---------------------------------------------------------------------------
+// Core event loop session
+// ---------------------------------------------------------------------------
 
-async fn run(debug: bool) -> zbus::Result<()> {
+/// Establishes D-Bus connections and runs the main event loop.
+/// Returns `Ok(true)` if clean shutdown was signaled, or `Err` on connection failure / stream EOF.
+async fn run_session(
+    debug: bool,
+    shutdown_rx: &Receiver<()>,
+) -> Result<bool, Box<dyn std::error::Error>> {
     if debug {
-        eprintln!("[DEBUG] Starting usbguard-notifier-rs v{}", env!("CARGO_PKG_VERSION"));
+        eprintln!("[DEBUG] Establishing D-Bus connections...");
     }
 
     let system_conn = zbus::connection::Builder::system()?.build().await?;
@@ -129,6 +131,8 @@ async fn run(debug: bool) -> zbus::Result<()> {
 
     let usbguard = DevicesProxy::new(&system_conn).await?;
     let notifications = NotificationsProxy::new(&session_conn).await?;
+
+    let caps = ServerCaps::query(&notifications, debug).await;
 
     let mut presence_stream = usbguard.receive_device_presence_changed().await?;
     let mut policy_stream = usbguard.receive_device_policy_changed().await?;
@@ -139,20 +143,33 @@ async fn run(debug: bool) -> zbus::Result<()> {
     let mut notif_to_dev: HashMap<u32, u32> = HashMap::new();
     let mut last_notified: HashMap<u32, Instant> = HashMap::new();
 
+    // Cascade detection: track rapid multi-device arrivals within a 1-second window
+    let mut cascade_start: Option<Instant> = None;
+    let mut cascade_count: u32 = 0;
+    const CASCADE_WINDOW: Duration = Duration::from_secs(1);
+    const CASCADE_THRESHOLD: u32 = 3;
+
     if debug {
         eprintln!("[DEBUG] Subscribed to USBGuard & Notification D-Bus signals. Active.");
     }
 
     loop {
         futures_util::select! {
+            // Signal: External shutdown (SIGTERM / SIGINT) -> wake immediately and dismiss active prompts
+            _ = shutdown_rx.recv().fuse() => {
+                for (_, nid) in dev_to_notif.drain() {
+                    let _ = notifications.close_notification(nid).await;
+                }
+                notif_to_dev.clear();
+                eprintln!("[INFO] Graceful shutdown complete. Closed active notifications.");
+                return Ok(true);
+            }
+
             // Signal: Device presence changed
             item = presence_stream.next() => {
                 let signal = match item {
                     Some(s) => s,
-                    None => return Err(zbus::Error::InputOutput(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionReset,
-                        "USBGuard presence signal stream ended",
-                    ).into())),
+                    None => return Err("USBGuard presence signal stream ended".into()),
                 };
 
                 let args = match signal.args() {
@@ -180,10 +197,13 @@ async fn run(debug: bool) -> zbus::Result<()> {
                 // Device is blocked or rejected -> display interactive prompt
                 if target != 0 {
                     let now = Instant::now();
-                    // Bound map size against unbounded growth / DoS
+
+                    // Anti-DoS: bound map size against unbounded growth
                     if last_notified.len() > 64 {
                         last_notified.retain(|_, t| now.duration_since(*t) < Duration::from_secs(30));
                     }
+
+                    // Per-device debounce: 2-second window
                     if let Some(prev) = last_notified.get(&dev_id) {
                         if now.duration_since(*prev) < Duration::from_secs(2) {
                             continue;
@@ -191,39 +211,95 @@ async fn run(debug: bool) -> zbus::Result<()> {
                     }
                     last_notified.insert(dev_id, now);
 
-                    let name = sanitize(extract_attr(&args.attributes, "name", &args.device_rule), 64, "Unknown Device");
-                    let vid_pid = sanitize(extract_attr(&args.attributes, "id", &args.device_rule), 16, "unknown");
-                    let port = sanitize(extract_attr(&args.attributes, "via-port", &args.device_rule), 16, "unknown");
-                    let serial = sanitize(extract_attr(&args.attributes, "serial", &args.device_rule), 32, "");
-
-                    let mut body = format!("<b>{name}</b>\nHardware ID: <code>{vid_pid}</code>\nPort: <code>{port}</code>");
-                    if !serial.is_empty() {
-                        body.push_str(&format!("\nSerial: <code>{serial}</code>"));
+                    // Cascade detection: batch rapid multi-device arrivals
+                    match cascade_start {
+                        Some(start) if now.duration_since(start) < CASCADE_WINDOW => {
+                            cascade_count += 1;
+                        }
+                        _ => {
+                            cascade_start = Some(now);
+                            cascade_count = 1;
+                        }
                     }
-                    body.push_str("\n\nSelect an authorization policy:");
 
-                    let actions = [
-                        "allow_once", "Allow Once",
-                        "allow_permanent", "Allow Always",
-                        "block", "Keep Blocked",
-                    ];
+                    if cascade_count > CASCADE_THRESHOLD {
+                        if cascade_count == CASCADE_THRESHOLD + 1 {
+                            let mut hints = HashMap::new();
+                            hints.insert("urgency", Value::U8(2));
+                            hints.insert("category", Value::Str("device.warning".into()));
+                            let body = format!(
+                                "Multiple USB devices blocked ({cascade_count}+).\nRun: usbguard list-devices"
+                            );
+                            let _ = notifications.notify(
+                                "USBGuard", 0, "security-high",
+                                "USB Device Cascade Detected",
+                                &body, &[], &hints, 0,
+                            ).await;
+                        }
+                        continue;
+                    }
+
+                    let name = sanitize(
+                        extract_attr(&args.attributes, "name", &args.device_rule), 64, "Unknown Device"
+                    );
+                    let vid_pid = sanitize(
+                        extract_attr(&args.attributes, "id", &args.device_rule), 16, "unknown"
+                    );
+                    let port = sanitize(
+                        extract_attr(&args.attributes, "via-port", &args.device_rule), 16, "unknown"
+                    );
+                    let serial = sanitize(
+                        extract_attr(&args.attributes, "serial", &args.device_rule), 32, ""
+                    );
+
+                    let raw_body = if caps.has_markup {
+                        let mut b = format!(
+                            "<b>{name}</b>\nHardware ID: <code>{vid_pid}</code>\nPort: <code>{port}</code>"
+                        );
+                        if !serial.is_empty() {
+                            b.push_str(&format!("\nSerial: <code>{serial}</code>"));
+                        }
+                        b
+                    } else {
+                        let mut b = format!("{name}\nHardware ID: {vid_pid}\nPort: {port}");
+                        if !serial.is_empty() {
+                            b.push_str(&format!("\nSerial: {serial}"));
+                        }
+                        b
+                    };
+
+                    let (body, actions): (String, &[&str]) = if caps.has_actions {
+                        let mut b = raw_body;
+                        b.push_str("\n\nSelect an authorization policy:");
+                        (b, &[
+                            "allow_once", "Allow Once",
+                            "allow_permanent", "Allow Always",
+                            "block", "Keep Blocked",
+                        ])
+                    } else {
+                        let mut b = raw_body;
+                        b.push_str(&format!(
+                            "\n\nTo authorize, run:\n  usbguard allow-device {dev_id}"
+                        ));
+                        (b, &[])
+                    };
+
+                    let final_body = if !caps.has_markup {
+                        strip_markup(&body)
+                    } else {
+                        body
+                    };
 
                     let mut hints = HashMap::new();
-                    hints.insert("urgency", Value::U8(2)); // Critical: persists until user interaction
+                    hints.insert("urgency", Value::U8(2));
                     hints.insert("category", Value::Str("device.warning".into()));
                     hints.insert("desktop-entry", Value::Str("org.usbguard".into()));
 
                     let replaces_id = dev_to_notif.get(&dev_id).copied().unwrap_or(0);
 
                     match notifications.notify(
-                        "USBGuard",
-                        replaces_id,
-                        "security-high",
-                        "USB Device Blocked",
-                        &body,
-                        &actions,
-                        &hints,
-                        0,
+                        "USBGuard", replaces_id, "security-high",
+                        "USB Device Blocked", &final_body, actions, &hints, 0,
                     ).await {
                         Ok(nid) => {
                             dev_to_notif.insert(dev_id, nid);
@@ -241,10 +317,7 @@ async fn run(debug: bool) -> zbus::Result<()> {
             item = policy_stream.next() => {
                 let signal = match item {
                     Some(s) => s,
-                    None => return Err(zbus::Error::InputOutput(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionReset,
-                        "USBGuard policy signal stream ended",
-                    ).into())),
+                    None => return Err("USBGuard policy signal stream ended".into()),
                 };
 
                 if let Ok(args) = signal.args() {
@@ -261,10 +334,7 @@ async fn run(debug: bool) -> zbus::Result<()> {
             item = action_stream.next() => {
                 let signal = match item {
                     Some(s) => s,
-                    None => return Err(zbus::Error::InputOutput(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionReset,
-                        "Notifications action signal stream ended",
-                    ).into())),
+                    None => return Err("Notifications action signal stream ended".into()),
                 };
 
                 if let Ok(args) = signal.args() {
@@ -319,10 +389,7 @@ async fn run(debug: bool) -> zbus::Result<()> {
             item = closed_stream.next() => {
                 let signal = match item {
                     Some(s) => s,
-                    None => return Err(zbus::Error::InputOutput(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionReset,
-                        "Notifications closed signal stream ended",
-                    ).into())),
+                    None => return Err("Notifications closed signal stream ended".into()),
                 };
 
                 if let Ok(args) = signal.args() {
@@ -334,6 +401,81 @@ async fn run(debug: bool) -> zbus::Result<()> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reconnection loop with exponential backoff & signal handling
+// ---------------------------------------------------------------------------
+
+/// Outer daemon loop: runs `run_session` inside an exponential backoff reconnection
+/// strategy. If the D-Bus broker or USBGuard daemon restarts, the notifier recovers
+/// automatically without process termination. Only explicit SIGTERM/SIGINT causes exit.
+async fn daemon_loop(debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let (shutdown_tx, shutdown_rx) = async_channel::bounded::<()>(1);
+
+    // Register UNIX signal handlers via signal-hook's safe self-pipe pattern.
+    let mut signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ])?;
+
+    std::thread::Builder::new()
+        .name("signal-handler".to_string())
+        .spawn(move || {
+            for sig in signals.forever() {
+                match sig {
+                    signal_hook::consts::SIGTERM | signal_hook::consts::SIGINT => {
+                        eprintln!("[INFO] Received termination signal ({sig}), shutting down...");
+                        let _ = shutdown_tx.try_send(());
+                        return;
+                    }
+                    signal_hook::consts::SIGHUP => {
+                        eprintln!("[INFO] Received SIGHUP (reload request acknowledged, no-op).");
+                    }
+                    _ => (),
+                }
+            }
+        })?;
+
+    let mut backoff = Duration::from_secs(1);
+    const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+    eprintln!(
+        "[INFO] usbguard-notifier-rs v{} starting.",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    loop {
+        match run_session(debug, &shutdown_rx).await {
+            Ok(true) => return Ok(()), // Clean shutdown requested
+            Ok(false) => return Ok(()),
+            Err(e) => {
+                if shutdown_rx.is_closed() || !shutdown_rx.is_empty() {
+                    return Ok(());
+                }
+                eprintln!(
+                    "[WARN] Session terminated: {e}. Reconnecting in {} seconds...",
+                    backoff.as_secs()
+                );
+
+                // Await timer or immediate shutdown signal during backoff
+                futures_util::select! {
+                    _ = FutureExt::fuse(async_io::Timer::after(backoff)) => {},
+                    _ = shutdown_rx.recv().fuse() => {
+                        eprintln!("[INFO] Shutdown received during backoff. Exiting cleanly.");
+                        return Ok(());
+                    }
+                }
+
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut debug = false;
@@ -361,6 +503,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    async_io::block_on(run(debug))?;
+    async_io::block_on(daemon_loop(debug))?;
     Ok(())
 }
