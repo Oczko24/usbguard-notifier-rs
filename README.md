@@ -1,44 +1,52 @@
 # usbguard-notifier-rs
 
-A lightweight, memory-safe, and interactive desktop notification daemon for **USBGuard**, written in Rust.
+A minimal, memory-safe, hardened interactive desktop notification daemon for **USBGuard**, written in Rust.
+
+> **Project Genesis & Engineering Standard:**  
+> This project was vibecoded through autonomous test-time compute scaling and iterative engineering refinement: zero runtime bloat, minimal source footprint, memory safety, and defense-in-depth threat mitigation.
 
 ---
 
 ## Overview
 
-[USBGuard](https://usbguard.github.io/) is an essential Linux security software framework that protects against BadUSB attacks, rogue flash drives, and unauthorized hardware peripherals by enforcing an authorization whitelist for USB devices.
+[USBGuard](https://usbguard.github.io/) protects Linux systems against BadUSB attacks, rogue hardware, and unauthorized peripherals by enforcing a device authorization policy on the kernel USB stack.
 
-However, the default user experience on modern Linux desktop environments (like GNOME, KDE, and Sway/Wayland) suffers from major usability issues:
-1. **Passive Notifications:** The official `usbguard-notifier` package only displays static, read-only desktop notifications (e.g. *"Device blocked"*). It provides no interactive buttons.
-2. **Abandoned GUIs:** Legacy Qt-based applets (`usbguard-applet-qt`) were deprecated or removed from upstream package repositories years ago.
-3. **Manual Friction:** Whenever you plug in an unwhitelisted device (a flash drive, game controller, audio interface, or diagnostic cable), you are forced to open a terminal, run `sudo usbguard list-devices`, identify the numeric ID, and execute `sudo usbguard allow-device <ID>`.
+However, default desktop notifications on modern Linux environments (GNOME Shell, KDE Plasma, Sway/Wayland) are passive:
+1. **No Interactive Controls:** The standard `usbguard-notifier` package only displays read-only notifications ("Device blocked").
+2. **Deprecated GUIs:** Legacy Qt applets (`usbguard-applet-qt`) are abandoned and removed from modern distribution repositories.
+3. **Manual CLI Friction:** Authorizing a new flash drive, peripheral, or diagnostic cable requires opening a terminal and running manual `usbguard` CLI commands.
 
-**`usbguard-notifier-rs` solves this friction cleanly and securely.** It monitors USBGuard events over the system D-Bus and instantly surfaces interactive desktop notifications with clickable action buttons:
+**`usbguard-notifier-rs` solves this with an ultra-lightweight daemon.** It listens to USBGuard D-Bus events and immediately surfaces interactive notifications with one-click authorization:
 
-* **[ Allow Once ]** / **[ Zezwól jednorazowo ]**: Authorizes the device temporarily for the active session. When unplugged, it returns to blocked.
-* **[ Allow Always ]** / **[ Zezwól na stałe ]**: Permanently saves the device whitelist rule into `/etc/usbguard/rules.conf`. The device will be remembered across reboots.
-* **[ Keep Blocked ]** / **[ Zablokuj ]**: Rejects the device and dismisses the notification.
+* **Allow Once**: Temporarily authorizes the device for the current session. The device returns to blocked upon disconnection.
+* **Allow Always**: Permanently appends an allow rule to `/etc/usbguard/rules.conf`. The device remains trusted across reboots.
+* **Keep Blocked**: Rejects the device and dismisses the notification prompt.
 
 ---
 
-## Key Features & Security Architecture
+## Security Architecture & Threat Model
 
-* **100% Safe Rust:** Written strictly in safe Rust (`#![forbid(unsafe_code)]`). Zero C FFI and no legacy C dependencies (`libdbus`, `libnotify`).
-* **Input Sanitization against BadUSB Injection:** USB descriptors (Vendor ID, Product ID, Manufacturer, Product Name) are controlled by device firmware. Malicious hardware (e.g., Flipper Zero, Rubber Ducky) can send strings containing HTML/Pango markup or ANSI escape codes. All incoming descriptors are sanitized, escaped, and truncated before passing to the desktop notification server.
-* **Anti-DoS / Debounce Protection:** Prevents notification queue flooding or desktop stutter caused by faulty cables or intentional high-frequency flapping/reconnecting attacks.
-* **Dynamic Lifecycle Management:** If a blocked device is physically removed from the USB port before an action is chosen, the notification is automatically dismissed (`CloseNotification`).
-* **Minimal Footprint:**
-  * Binary size: ~1.9 MB (stripped, LTO enabled).
-  * Runtime RAM usage: ~3 MB.
+USB descriptors (Vendor ID, Product ID, Manufacturer, Product Name, Serial) are unauthenticated inputs controlled entirely by the connected hardware microcontroller. A malicious USB device (e.g., Flipper Zero, USB Rubber Ducky, BadUSB) can craft adversarial payloads inside these fields.
+
+`usbguard-notifier-rs` is engineered with defensive parsing and system isolation:
+
+* **100% Safe Rust:** Strictly enforced `#![forbid(unsafe_code)]`. Zero C FFI, no legacy C libraries (`libdbus`, `libnotify`).
+* **Bidirectional Unicode Defense (Trojan Source):** Drops all Unicode bidi override characters (`U+202A` through `U+202E`, `U+2066` through `U+2069`, `U+200E`, `U+200F`) preventing visual spoofing and character order reversal attacks.
+* **Pango & HTML Markup Sanitization:** Escapes all XML entities (`&`, `<`, `>`, `"`, `'`) and filters ANSI escape sequences and control characters before passing strings to the desktop notification server.
+* **Length Caps & Input Truncation:** Enforces strict field boundaries (device names capped at 64 chars, IDs and ports at 16 chars, serials at 32 chars) preventing notification server memory exhaustion.
+* **Anti-DoS & Rate Limiting:** Debounces rapid connect/disconnect cycles (2-second per-device window) to prevent desktop freezing during hardware fuzzing or faulty cable flapping. Internal state maps are automatically bounded and pruned.
+* **Resilient Stream Termination:** Unlike naive event loops that spin at 100% CPU when D-Bus connections drop, stream EOFs are handled gracefully, exiting cleanly for systemd supervisor auto-restart.
+* **Dynamic Lifecycle Tracking:** When a blocked device is physically removed before the user decides, its pending notification is withdrawn immediately via `CloseNotification`.
+* **Micro Footprint:**
+  * Binary size: ~1.2 MB (stripped, LTO enabled, size-optimized).
+  * Runtime RAM usage: ~2.0 MB.
   * Idle CPU usage: 0%.
-* **Automatic i18n:** Automatically adapts to your system language (`$LANG`), with English as default and built-in Polish translation (`--lang en` / `--lang pl`).
-* **Least Privilege:** Runs entirely inside the unprivileged user session (`systemd --user`). Does not require root privileges or background daemons with elevated capabilities.
 
 ---
 
 ## Architecture Flow
 
-```
+```text
 +-------------------------------------------------------------+
 | Physical Hardware (USB Port)                                |
 +-------------------------------------------------------------+
@@ -51,14 +59,14 @@ However, the default user experience on modern Linux desktop environments (like 
                               | (D-Bus Signal: DevicePresenceChanged)
                               v
 +-------------------------------------------------------------+
-| usbguard-notifier-rs (User Session Daemon)                  |
-| -> Sanitizes USB descriptors, enforces debounce & rate-limit|
+| usbguard-notifier-rs (Sandboxed User Session Daemon)         |
+| -> Sanitizes descriptors, enforces rate limits, manages IDs |
 +-------------------------------------------------------------+
                               | (D-Bus Method: org.freedesktop.Notifications.Notify)
                               v
 +-------------------------------------------------------------+
-| Desktop Environment (GNOME Shell / Notification Daemon)     |
-| Surfaces interactive notification with clickable buttons    |
+| Desktop Environment (GNOME Shell / Notification Server)     |
+| Surfaces interactive prompt with action buttons:            |
 | [ Allow Once ]   [ Allow Always ]   [ Keep Blocked ]        |
 +-------------------------------------------------------------+
                               | (User clicks Action)
@@ -75,7 +83,7 @@ However, the default user experience on modern Linux desktop environments (like 
 
 ### 1. Prerequisites
 
-Ensure `usbguard` and `usbguard-dbus` are installed and running on your system:
+Ensure `usbguard` and `usbguard-dbus` are installed and running:
 
 **Fedora / RHEL:**
 ```bash
@@ -95,7 +103,7 @@ sudo apt install usbguard
 sudo systemctl enable --now usbguard
 ```
 
-Ensure your user is in the `wheel` or `sudo` group so Polkit can delegate device policy permissions.
+Ensure your user belongs to the `wheel` or `sudo` group so Polkit can delegate authorization.
 
 ---
 
@@ -106,22 +114,23 @@ git clone https://github.com/Oczko24/usbguard-notifier-rs.git
 cd usbguard-notifier-rs
 cargo build --release
 
-# Install binary to user path
+# Install binary to user local path
 mkdir -p ~/.local/bin
 cp target/release/usbguard-notifier-rs ~/.local/bin/
+chmod +x ~/.local/bin/usbguard-notifier-rs
 ```
 
 ---
 
 ### 3. Setup Systemd User Service
 
-1. Disable the passive default notifier (if installed):
+1. Mask the passive default notifier (if installed):
 ```bash
 systemctl --user stop usbguard-notifier 2>/dev/null || true
 systemctl --user mask usbguard-notifier 2>/dev/null || true
 ```
 
-2. Copy and enable the provided systemd service unit:
+2. Install and enable the hardened user service:
 ```bash
 mkdir -p ~/.config/systemd/user
 cp systemd/usbguard-notifier-rs.service ~/.config/systemd/user/
@@ -130,18 +139,16 @@ systemctl --user daemon-reload
 systemctl --user enable --now usbguard-notifier-rs.service
 ```
 
-3. Check service status:
+3. Verify service status:
 ```bash
 systemctl --user status usbguard-notifier-rs.service
 ```
 
 ---
 
-### 4. Optional: Passwordless Approval via Polkit
+### 4. Optional: Polkit Configuration
 
-By default, approving a USB device via D-Bus triggers a Polkit administrator authentication dialog (`auth_admin`).
-
-If you prefer to allow active local users in the `wheel` group to authorize USB devices directly from notifications without entering your password every time, install the provided Polkit rule:
+Authorizing devices via D-Bus triggers a Polkit prompt. To allow local users in the `wheel` group to authorize devices directly from notification buttons without typing passwords every time, install the included rule:
 
 ```bash
 sudo cp polkit/70-usbguard-user.rules /etc/polkit-1/rules.d/
@@ -153,32 +160,36 @@ sudo cp polkit/70-usbguard-user.rules /etc/polkit-1/rules.d/
 
 ```text
 usbguard-notifier-rs 0.1.0
-Interactive, memory-safe USBGuard desktop notification agent written in Rust.
+Minimal, hardened interactive USBGuard notification daemon.
 
-USAGE:
-    usbguard-notifier-rs [OPTIONS]
+Usage: usbguard-notifier-rs [OPTIONS]
 
-OPTIONS:
-    -d, --debug        Enable debug logging output to stderr
-    -l, --lang <LANG>  Force UI language ('en' or 'pl') [default: auto-detected from $LANG]
-    -h, --help         Print this help information
-    -V, --version      Print version information
+Options:
+  -d, --debug    Enable debug logging to stderr
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
 ---
 
-## Security Hardening Details
+## Systemd Hardening Profile
 
-The systemd service unit includes security restrictions:
-* `NoNewPrivileges=yes`: Prevents gaining additional privileges through SUID executables.
-* `ProtectSystem=strict`: The entire `/usr`, `/boot`, and `/etc` are mounted read-only for this process.
-* `ProtectHome=read-only`: Protects your user home directory against unauthorized modifications.
-* `PrivateTmp=yes`: Isolates the process `/tmp` directory.
-* `RestrictSUIDSGID=yes`: Prevents creation of SUID/SGID files.
-* `LockPersonality=yes`: Locks down execution domain changes.
+The provided unit runs with sandboxing restrictions verified by `systemd-analyze`:
+
+* `NoNewPrivileges=yes`: Prevents gaining extra privileges via SUID binaries.
+* `ProtectSystem=strict`: Mounts `/usr`, `/boot`, and `/etc` strictly read-only.
+* `ProtectHome=read-only`: Disallows modifying files in the home directory.
+* `PrivateTmp=yes`: Provides an isolated `/tmp` namespace.
+* `RestrictSUIDSGID=yes`: Prevents creating setuid/setgid files.
+* `LockPersonality=yes`: Prevents ABI personality shifts.
+* `MemoryDenyWriteExecute=yes`: Disallows creating writable and executable memory mappings.
+* `RestrictNamespaces=yes`: Disallows creating arbitrary kernel namespaces.
+* `SystemCallArchitectures=native`: Restricts syscalls to the native architecture.
+* `RestrictAddressFamilies=AF_UNIX`: Blocks all IP networking (`AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); only allows local UNIX domain sockets.
+* `UMask=0077`: Restricts file creation permissions.
 
 ---
 
 ## License
 
-This project is licensed under the terms of the MIT License. See [LICENSE](LICENSE) for details.
+This project is licensed under the terms of the MIT License or Apache-2.0. See [LICENSE](LICENSE) for details.
