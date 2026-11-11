@@ -188,7 +188,7 @@ cargo +nightly fuzz run fuzz_extract_attr
 ## CLI Options
 
 ```text
-usbguard-notifier-rs 0.2.0
+usbguard-notifier-rs 0.2.1
 Minimal, hardened interactive USBGuard notification daemon.
 
 Usage: usbguard-notifier-rs [OPTIONS]

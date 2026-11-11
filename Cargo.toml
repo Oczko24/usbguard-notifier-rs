@@ -1,6 +1,6 @@
 [package]
 name = "usbguard-notifier-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Oczko24"]
 description = "A lightweight, memory-safe, and interactive USBGuard desktop notification daemon written in Rust."

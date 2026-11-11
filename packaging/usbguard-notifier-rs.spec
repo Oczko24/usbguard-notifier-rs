@@ -1,7 +1,7 @@
 %global crate_name usbguard-notifier-rs
 
 Name:           %{crate_name}
-Version:        0.1.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Minimal, hardened interactive USBGuard desktop notification daemon
 
@@ -60,6 +60,13 @@ cargo test --release
 %config(noreplace) %{_sysconfdir}/polkit-1/rules.d/70-usbguard-user.rules
 
 %changelog
+* Wed Nov 11 2026 Oczko24 <oczko24@users.noreply.github.com> - 0.2.1-1
+- Fix systemd user service binding: change WantedBy to graphical-session.target
+- Resolves silent startup failure due to ConditionEnvironment=|WAYLAND_DISPLAY not met at early user session boot
+
+* Sat Nov 08 2026 Oczko24 <oczko24@users.noreply.github.com> - 0.2.0-1
+- Hardened v0.2.0 release: backoff reconnection, instant signal handling, proptest and packaging
+
 * Sat Nov 08 2026 Oczko24 <oczko24@users.noreply.github.com> - 0.1.0-1
 - Initial package release
 - Safe Rust daemon with interactive USB device authorization notifications
