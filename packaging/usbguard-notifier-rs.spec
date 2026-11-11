@@ -1,7 +1,7 @@
 %global crate_name usbguard-notifier-rs
 
 Name:           %{crate_name}
-Version:        0.2.1
+Version:        0.2.2
 Release:        1%{?dist}
 Summary:        Minimal, hardened interactive USBGuard desktop notification daemon
 
@@ -60,6 +60,16 @@ cargo test --release
 %config(noreplace) %{_sysconfdir}/polkit-1/rules.d/70-usbguard-user.rules
 
 %changelog
+* Wed Nov 11 2026 Oczko24 <oczko24@users.noreply.github.com> - 0.2.2-1
+- Security hardening and zero-unsafe codebase minimization (VICTORY CONFIRMED):
+- Fix USBGuard EventType::Remove event handling to eliminate stale notification TOCTOU
+- Scope polkit rules strictly to applyDevicePolicy and listDevices (wheel and sudo)
+- BadUSB interface detection: alert user when blocked devices present HID or network interfaces
+- Zero-allocation attribute parser with backslash-parity and token isolation
+- Unicode line/paragraph separator sanitization (U+2028, U+2029) to prevent UI spoofing
+- Determinist bounded FIFO prompt map (hard cap 32)
+- Exponential reconnect backoff with 10s stability reset and RestartSteps=5 in systemd unit
+
 * Wed Nov 11 2026 Oczko24 <oczko24@users.noreply.github.com> - 0.2.1-1
 - Fix systemd user service binding: change WantedBy to graphical-session.target
 - Resolves silent startup failure due to ConditionEnvironment=|WAYLAND_DISPLAY not met at early user session boot

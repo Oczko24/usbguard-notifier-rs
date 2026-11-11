@@ -32,7 +32,8 @@ USB descriptors (Vendor ID, Product ID, Manufacturer, Product Name, Serial) are 
 
 * **100% Safe Rust:** Strictly enforced `#![forbid(unsafe_code)]`. Zero C FFI, no legacy C libraries (`libdbus`, `libnotify`).
 * **Bidirectional Unicode Defense (Trojan Source):** Drops all Unicode bidi override characters (`U+202A` through `U+202E`, `U+2066` through `U+2069`, `U+200E`, `U+200F`) preventing visual spoofing and character order reversal attacks.
-* **Pango & HTML Markup Sanitization:** Escapes all XML entities (`&`, `<`, `>`, `"`, `'`) and filters ANSI escape sequences and control characters before passing strings to the desktop notification server.
+* **Pango & HTML Markup Sanitization:** Escapes all XML entities (`&`, `<`, `>`, `"`, `'`) and filters ANSI escape sequences, control characters, and Unicode line/paragraph separators (`U+2028`, `U+2029`) before passing strings to the desktop notification server.
+* **Interface Class Inspection (BadUSB Defense):** Inspects USB device interface descriptors (`with-interface`) and alerts the user if a blocked device exposes HID (keyboard/mouse) or network adapter interfaces to prevent keystroke injection attacks.
 * **Length Caps & Input Truncation:** Enforces strict field boundaries (device names capped at 64 chars, IDs and ports at 16 chars, serials at 32 chars) preventing notification server memory exhaustion.
 * **Anti-DoS & Multi-Device Cascade Protection:** Debounces rapid connect/disconnect cycles (2-second per-device window) to prevent desktop freezing during hardware fuzzing. Batches rapid multi-device cascades (more than 3 devices in 1 second) into summary alerts to prevent notification flooding.
 * **Zero-Downtime Reconnection:** Wraps the D-Bus session in an internal exponential backoff loop (1s to 60s). If the D-Bus broker or `usbguard-daemon` restarts, the notifier recovers automatically without terminating.
@@ -119,10 +120,12 @@ git clone https://github.com/Oczko24/usbguard-notifier-rs.git
 cd usbguard-notifier-rs
 cargo build --release
 
-# Install binary to user local path
+# Option A: System-wide install (matches packaged systemd unit)
+sudo install -Dm755 target/release/usbguard-notifier-rs /usr/bin/usbguard-notifier-rs
+
+# Option B: User local install
 mkdir -p ~/.local/bin
-cp target/release/usbguard-notifier-rs ~/.local/bin/
-chmod +x ~/.local/bin/usbguard-notifier-rs
+install -Dm755 target/release/usbguard-notifier-rs ~/.local/bin/usbguard-notifier-rs
 ```
 
 ---
@@ -140,6 +143,9 @@ systemctl --user mask usbguard-notifier 2>/dev/null || true
 mkdir -p ~/.config/systemd/user
 cp systemd/usbguard-notifier-rs.service ~/.config/systemd/user/
 
+# If you installed to ~/.local/bin instead of /usr/bin, adjust the ExecStart path:
+# sed -i "s|/usr/bin/|%h/.local/bin/|" ~/.config/systemd/user/usbguard-notifier-rs.service
+
 systemctl --user daemon-reload
 systemctl --user enable --now usbguard-notifier-rs.service
 ```
@@ -153,7 +159,7 @@ systemctl --user status usbguard-notifier-rs.service
 
 ### 4. Polkit Configuration
 
-Authorizing devices via D-Bus triggers a Polkit prompt. To allow local users in the `wheel` group to authorize devices directly from notification buttons without typing passwords every time, install the included rule:
+Authorizing devices via D-Bus triggers a Polkit prompt. To allow local administrative users (`wheel` or `sudo` group) to authorize devices directly from notification buttons without typing passwords every time, install the included rule:
 
 ```bash
 sudo cp polkit/70-usbguard-user.rules /etc/polkit-1/rules.d/
@@ -162,8 +168,8 @@ sudo cp polkit/70-usbguard-user.rules /etc/polkit-1/rules.d/
 **Security Constraints in Polkit Rule:**
 - `subject.active`: Only foreground VT/seat sessions (prevents background process abuse).
 - `subject.local`: Only physically local sessions (prevents remote SSH session hijacking).
-- `subject.isInGroup("wheel")`: Restricted strictly to administrative users.
-- Explicitly scoped action IDs: `applyDevicePolicy`, `listDevices`, `appendRule`, `removeRule`.
+- `subject.isInGroup("wheel") || subject.isInGroup("sudo")`: Restricted strictly to administrative users.
+- Minimal action IDs: strictly restricted to device policy authorization (`applyDevicePolicy` and `listDevices`). Blanket rule alteration (`Policy1.*`) is strictly denied.
 
 ---
 
@@ -172,7 +178,7 @@ sudo cp polkit/70-usbguard-user.rules /etc/polkit-1/rules.d/
 The crate includes property-based tests using `proptest` and `cargo-fuzz` targets:
 
 ```bash
-# Run unit and property tests (3,500 fuzzed property test cases)
+# Run unit and property tests (41 test cases, 7,000 randomized property iterations)
 cargo test --all-targets
 
 # Run sanitization property suite specifically
@@ -188,7 +194,7 @@ cargo +nightly fuzz run fuzz_extract_attr
 ## CLI Options
 
 ```text
-usbguard-notifier-rs 0.2.1
+usbguard-notifier-rs 0.2.2
 Minimal, hardened interactive USBGuard notification daemon.
 
 Usage: usbguard-notifier-rs [OPTIONS]

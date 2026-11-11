@@ -26,6 +26,8 @@ fn adversarial_string() -> impl Strategy<Value = String> {
         Just("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".repeat(10)),
         Just("\x1B[31;1mRedText\x1B[0m\r\n\t".into()),
         Just("\x7F\x1B]0;Injected Title\x07".into()),
+        // Unicode line and paragraph separators
+        Just("\u{2028}line\u{2029}break\u{2028}".into()),
         // Pathological edge cases
         Just("".into()),
         Just("   \t\r\n   ".into()),
@@ -120,6 +122,17 @@ proptest! {
     }
 
     #[test]
+    fn prop_sanitize_no_line_separators(
+        input in adversarial_string(),
+        max_len in 1usize..256,
+        fallback in "[a-zA-Z0-9_-]{1,16}",
+    ) {
+        let result = sanitize(&input, max_len, &fallback);
+        prop_assert!(!result.contains('\u{2028}'), "Result contains U+2028: {}", result);
+        prop_assert!(!result.contains('\u{2029}'), "Result contains U+2029: {}", result);
+    }
+
+    #[test]
     fn prop_extract_attr_never_panics(
         key in "[a-z-]{1,16}",
         rule in adversarial_string(),
@@ -138,5 +151,78 @@ proptest! {
         let stripped = strip_markup(&input);
         prop_assert!(!stripped.contains('<'));
         prop_assert!(!stripped.contains('>'));
+    }
+
+    #[test]
+    fn prop_extract_attr_zero_allocation_subslice(
+        key in "[a-z-]{1,16}",
+        rule in adversarial_string(),
+    ) {
+        let empty_map = HashMap::new();
+        let res = extract_attr(&empty_map, &key, &rule);
+        if !res.is_empty() {
+            let rule_start = rule.as_ptr() as usize;
+            let rule_end = rule_start + rule.len();
+            let res_start = res.as_ptr() as usize;
+            let res_end = res_start + res.len();
+            prop_assert!(res_start >= rule_start, "Subslice starts before rule buffer");
+            prop_assert!(res_end <= rule_end, "Subslice ends after rule buffer");
+        }
+    }
+
+    #[test]
+    fn prop_extract_attr_token_isolation(
+        key in prop_oneof![Just("serial"), Just("name"), Just("via-port")],
+        spoofed in "[a-zA-Z0-9_-]{1,16}",
+        genuine in "[a-zA-Z0-9_-]{1,16}",
+    ) {
+        let empty_map = HashMap::new();
+        let rule = format!(r#"block other "prefix {key} \"{spoofed}\" suffix" {key} "{genuine}""#);
+        let extracted = extract_attr(&empty_map, key, &rule);
+        prop_assert_eq!(extracted, genuine.as_str());
+    }
+
+    #[test]
+    fn prop_extract_attr_id_isolation(
+        spoofed_id in "[0-9a-f]{4}:[0-9a-f]{4}",
+        genuine_id in "[0-9a-f]{4}:[0-9a-f]{4}",
+    ) {
+        let empty_map = HashMap::new();
+        let rule = format!(r#"block name "Device id {spoofed_id}" id {genuine_id}"#);
+        let extracted = extract_attr(&empty_map, "id", &rule);
+        prop_assert_eq!(extracted, genuine_id.as_str());
+    }
+
+    #[test]
+    fn prop_extract_attr_word_substring_isolation(
+        word in prop_oneof![Just("Solid"), Just("liquid"), Just("rapid"), Just("Florida"), Just("uuid")],
+        genuine_id in "[0-9a-f]{4}:[0-9a-f]{4}",
+    ) {
+        let empty_map = HashMap::new();
+        let rule = format!(r#"block name "{word} State Drive" id {genuine_id}"#);
+        let extracted = extract_attr(&empty_map, "id", &rule);
+        prop_assert_eq!(extracted, genuine_id.as_str());
+    }
+
+    #[test]
+    fn prop_sanitize_preserves_valid_unicode(
+        input in "[a-zA-Z0-9\u{00C0}-\u{024F}\u{0400}-\u{04FF}\u{4E00}-\u{9FFF}]{1,32}",
+    ) {
+        let sanitized = sanitize(&input, 64, "fb");
+        prop_assert_eq!(sanitized, input);
+    }
+
+    #[test]
+    fn prop_extract_attr_escaped_quotes_isolation(
+        key in prop_oneof![Just("serial"), Just("name"), Just("via-port")],
+        val_with_escaped in r#"([a-zA-Z0-9 ]*\\"[a-zA-Z0-9 ]*){1,3}"#,
+        genuine_id in "[0-9a-f]{4}:[0-9a-f]{4}",
+    ) {
+        let empty_map = HashMap::new();
+        let rule = format!(r#"block other "{val_with_escaped}" id {genuine_id} {key} "target""#);
+        let extracted_id = extract_attr(&empty_map, "id", &rule);
+        prop_assert_eq!(extracted_id, genuine_id.as_str());
+        let extracted_key = extract_attr(&empty_map, key, &rule);
+        prop_assert_eq!(extracted_key, "target");
     }
 }

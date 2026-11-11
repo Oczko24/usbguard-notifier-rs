@@ -8,10 +8,11 @@ ConditionEnvironment=|WAYLAND_DISPLAY
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/usbguard-notifier-rs
+ExecStart=/usr/bin/usbguard-notifier-rs
 Restart=on-failure
 RestartSec=3
 RestartMaxDelaySec=60
+RestartSteps=5
 
 # -- Process & Filesystem Isolation --
 NoNewPrivileges=yes

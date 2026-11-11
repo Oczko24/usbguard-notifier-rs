@@ -2,30 +2,25 @@
 //
 // Polkit authorization rule for usbguard-notifier-rs.
 //
-// Grants local, active, graphical-session users in the 'wheel' group
+// Grants local, active, graphical-session users in administrative groups (wheel or sudo)
 // permission to authorize or reject USB devices via the USBGuard D-Bus API
 // without requiring interactive root authentication on each action.
 //
 // SECURITY CONSTRAINTS:
 //   - subject.active:  Only foreground VT/seat sessions (prevents background process abuse).
 //   - subject.local:   Only physically local sessions (prevents remote SSH session hijacking).
-//   - subject.isInGroup("wheel"): Only administrative users.
-//   - Action IDs are scoped to the minimum required set:
-//       * applyDevicePolicy: change device target (allow/block/reject)
-//       * appendRule: persist permanent allow rules
-//       * removeRule: revoke previously saved rules
+//   - subject.isInGroup("wheel") || subject.isInGroup("sudo"): Only administrative users.
+//   - Action IDs are strictly restricted to device policy authorization:
+//       * applyDevicePolicy: change device target (allow/block/reject, runtime or permanent)
 //       * listDevices: enumerate connected USB devices
 //
-// This rule explicitly does NOT grant blanket org.usbguard.* permissions.
-// Capabilities like modifying the global ImplicitPolicyTarget or IPCAccessControl
-// remain restricted to root.
+// Explicitly does NOT grant org.usbguard.Policy1.* (appendRule, removeRule) or
+// modification of global daemon settings. Any manual rule modifications require root.
 
 polkit.addRule(function(action, subject) {
     if ((action.id === "org.usbguard.Devices1.applyDevicePolicy" ||
-         action.id === "org.usbguard.Devices1.listDevices" ||
-         action.id === "org.usbguard.Policy1.appendRule" ||
-         action.id === "org.usbguard.Policy1.removeRule") &&
-        subject.isInGroup("wheel") &&
+         action.id === "org.usbguard.Devices1.listDevices") &&
+        (subject.isInGroup("wheel") || subject.isInGroup("sudo")) &&
         subject.active &&
         subject.local) {
         return polkit.Result.YES;

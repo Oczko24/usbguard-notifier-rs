@@ -1,6 +1,6 @@
 # Maintainer: Oczko24 <oczko24@users.noreply.github.com>
 pkgname=usbguard-notifier-rs
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc="Minimal, hardened interactive USBGuard desktop notification daemon in Rust"
 arch=('x86_64')
